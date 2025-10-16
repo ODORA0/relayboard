@@ -8,4 +8,4 @@ relayboard:
       password: relayboard
       dbname: relayboard
       schema: warehouse
-      port: 5432
+      port: 5433
