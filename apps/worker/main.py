@@ -64,7 +64,7 @@ def load_csv_to_postgres(csv_bytes: bytes, pg: PGInfo, staging_table: str):
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
             cur.execute("create schema if not exists staging;")
-            cur.execute(f'drop table if exists staging."{staging_table}";')
+            cur.execute(f'drop table if exists staging."{staging_table}" CASCADE;')
             # Use pandas to infer & create
             df = pd.read_csv(io.BytesIO(csv_bytes))
             # Clean column names to be valid PostgreSQL identifiers
@@ -83,12 +83,21 @@ def load_csv_to_postgres(csv_bytes: bytes, pg: PGInfo, staging_table: str):
             # Define table structure (all text for simplicity)
             col_defs = ", ".join([f'"{c}" text' for c in df.columns])
             cur.execute(f'create table staging."{staging_table}" ({col_defs});')
-            # Write temp CSV to disk and use psycopg copy
-            tmp_path = tempfile.mktemp(suffix=".csv")
-            df.to_csv(tmp_path, index=False)
-            with open(tmp_path, "r", encoding="utf-8") as f:
-                cur.copy(f'COPY staging."{staging_table}" FROM STDIN WITH (FORMAT CSV, HEADER TRUE)', f)
-            os.remove(tmp_path)
+            # Debug: print CSV content
+            console.print(f"[blue]CSV content preview: {df.head()}")
+            console.print(f"[blue]CSV shape: {df.shape}")
+            
+            # Insert data row by row
+            for _, row in df.iterrows():
+                values = [str(v) if pd.notna(v) else None for v in row.values]
+                placeholders = ', '.join(['%s'] * len(values))
+                insert_sql = f'INSERT INTO staging."{staging_table}" VALUES ({placeholders})'
+                cur.execute(insert_sql, values)
+            
+            # Verify data was loaded
+            cur.execute(f'SELECT COUNT(*) FROM staging."{staging_table}"')
+            count = cur.fetchone()[0]
+            console.print(f"[green]✓ Loaded {count} rows into staging.{staging_table}")
         conn.commit()
 
 def ensure_dbt_model(dataset: str, df_sample_cols):
@@ -118,29 +127,50 @@ def run_dbt(pg: PGInfo):
     dbt_dir = os.path.join(os.getcwd(), '..', '..', 'dbt', 'relayboard')
     return subprocess.run(["dbt", "run"], cwd=dbt_dir, capture_output=True, text=True)
 
-def dispatch_to_slack(slack: SlackInfo, pg: PGInfo, dataset: str, limit:int=5):
+def dispatch_to_slack(slack: SlackInfo, pg: PGInfo, dataset: str, max_rows_per_message: int = 20):
     conn_str = f"host={pg.host} port={pg.port} user={pg.user} password={pg.password} dbname={pg.database}"
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
             # simple: read from warehouse.<dataset>_clean if exists, else from staging
             table = f'warehouse."{dataset}_clean"'
             try:
-                cur.execute(f"select * from {table} limit {limit}")
+                # First, get total count
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                total_rows = cur.fetchone()[0]
+                
+                # Then get the data
+                cur.execute(f"SELECT * FROM {table} ORDER BY 1 LIMIT {max_rows_per_message}")
             except Exception:
                 table = f'staging."{dataset}"'
-                cur.execute(f"select * from {table} limit {limit}")
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                total_rows = cur.fetchone()[0]
+                cur.execute(f"SELECT * FROM {table} ORDER BY 1 LIMIT {max_rows_per_message}")
+            
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description]
-    text_lines = ["*Relayboard Dispatch*",
-                  f"Table: `{table}`",
-                  f"Rows: {len(rows)}",
-                  "```"]
-    for r in rows:
-        line = ', '.join([f"{c}={str(v)[:32]}" for c,v in zip(cols, r)])
-        text_lines.append(line)
-    text_lines.append("```")
-    payload = {"text": "\n".join(text_lines)}
-    requests.post(slack.webhookUrl, json=payload)
+            
+            # Create the main message
+            text_lines = [
+                "*Relayboard Dispatch*",
+                f"Table: `{table}`",
+                f"Total Rows: {total_rows}",
+                f"Showing: {len(rows)} rows" + (f" (first {max_rows_per_message})" if total_rows > max_rows_per_message else ""),
+                "```"
+            ]
+            
+            # Add data rows
+            for r in rows:
+                line = ', '.join([f"{c}={str(v)[:32]}" for c,v in zip(cols, r)])
+                text_lines.append(line)
+            
+            text_lines.append("```")
+            
+            # If there are more rows, add a note
+            if total_rows > max_rows_per_message:
+                text_lines.append(f"_Note: Showing first {max_rows_per_message} of {total_rows} total rows_")
+            
+            payload = {"text": "\n".join(text_lines)}
+            requests.post(slack.webhookUrl, json=payload)
 
 @app.post('/run_full')
 def run_full(payload: RunFullPayload):
@@ -170,7 +200,7 @@ def run_full(payload: RunFullPayload):
         # 4) dispatch to Slack
         if payload.slack and payload.slack.webhookUrl:
             console.print("[yellow]Step 5: Dispatching to Slack...")
-            dispatch_to_slack(payload.slack, payload.pg, payload.datasetName, limit=5)
+            dispatch_to_slack(payload.slack, payload.pg, payload.datasetName, max_rows_per_message=20)
             console.print("[green]✓ Slack dispatch completed")
         
         return {"ok": True, "dbt_stdout": r.stdout[-500:], "dbt_stderr": r.stderr[-500:]}
