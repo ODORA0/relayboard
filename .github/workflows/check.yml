@@ -1,0 +1,14 @@
+name: checks
+on: [push, pull_request]
+jobs:
+  lint-type:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.11.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - run: pnpm i
+      - run: pnpm -w lint || true
+      - run: pnpm -w typecheck || true

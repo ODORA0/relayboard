@@ -1,0 +1,59 @@
+{
+  "name": "@relayboard/api",
+  "version": "1.0.0",
+  "description": "NestJS API server for Relayboard data pipeline platform",
+  "private": true,
+  "type": "module",
+  "author": {
+    "name": "AJAL ODORA JONATHAN",
+    "email": "contact@odora.dev",
+    "url": "https://github.com/ODORA0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ODORA0/relayboard.git"
+  },
+  "homepage": "https://github.com/ODORA0/relayboard#readme",
+  "bugs": {
+    "url": "https://github.com/ODORA0/relayboard/issues"
+  },
+  "keywords": [
+    "nestjs",
+    "api",
+    "data-pipeline",
+    "csv-processing",
+    "postgresql",
+    "minio",
+    "typescript"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@nestjs/common": "10.4.7",
+    "@nestjs/core": "10.4.7",
+    "@nestjs/platform-express": "10.4.7",
+    "dotenv": "16.4.5",
+    "minio": "8.0.2",
+    "pg": "8.13.1",
+    "pino": "9.4.0",
+    "pino-pretty": "11.2.2",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.1",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "20.11.30",
+    "@types/pg": "^8.15.5",
+    "eslint": "9.9.0",
+    "ts-node": "10.9.2",
+    "tslib": "2.8.1",
+    "tsx": "4.19.2",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,11 @@
+relayboard:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: 127.0.0.1
+      user: relayboard
+      password: relayboard
+      dbname: relayboard
+      schema: warehouse
+      port: 5432
