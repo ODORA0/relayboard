@@ -102,7 +102,27 @@ export class AppController {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
     });
+
+    if (!r.ok) {
+      const errorText = await r.text();
+      console.error(`Worker request failed: ${r.status} ${errorText}`);
+      return {
+        ok: false,
+        error: `Worker request failed: ${r.status} ${errorText}`,
+      };
+    }
+
     const jr = await r.json();
+
+    if (!jr.ok) {
+      console.error(`Worker processing failed:`, jr);
+      return {
+        ok: false,
+        error: jr.error || "Worker processing failed",
+        details: jr,
+      };
+    }
+
     return { ok: true, runId, worker: jr };
   }
 }
