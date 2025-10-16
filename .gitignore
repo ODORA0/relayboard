@@ -107,6 +107,12 @@ temp/
 ehthumbs.db
 Thumbs.db
 
+# dbt
+target/
+dbt_packages/
+dbt/relayboard/target/
+dbt/relayboard/.user.yml
+
 # Python
 __pycache__/
 *.py[cod]
