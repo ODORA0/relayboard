@@ -11,6 +11,21 @@
 
 Relayboard is a modern data pipeline automation platform that transforms CSV/Google Sheets data into actionable insights delivered directly to your team's Slack channels. It automates the entire data processing workflow from ingestion to delivery.
 
+## 🎬 **See It In Action**
+
+Watch Relayboard transform CSV data into Slack notifications in real-time:
+
+https://github.com/user-attachments/assets/d0dff3be-6aed-4a28-8ab7-32108f9885df
+
+
+### **What You'll See:**
+
+- 📊 CSV dataset registration via web interface
+- ⚡ One-click pipeline execution
+- 🔄 Real-time processing status updates
+- 📱 Instant Slack notifications with data previews
+- 🎯 Smart data sampling for large datasets
+
 ## 🎯 **What Problem Does It Solve?**
 
 Many teams struggle with:

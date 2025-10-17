@@ -19,6 +19,10 @@ from datetime import datetime
 app = FastAPI()
 console = Console()
 
+@app.get('/health')
+def health():
+    return {"ok": True, "service": "worker", "ts": datetime.now().isoformat()}
+
 class S3Info(BaseModel):
     endpoint: str
     bucket: str
@@ -59,12 +63,63 @@ def preview(payload: Dict[str, Any]):
     # placeholder
     return {"ok": True, "msg": "implement preview with DuckDB on bytes"}
 
+@app.post('/export_data')
+def export_data(payload: Dict[str, Any]):
+    """Export full dataset as CSV for large datasets"""
+    try:
+        dataset_name = payload.get('datasetName')
+        pg_info = payload.get('pg')
+        
+        if not dataset_name or not pg_info:
+            return {"ok": False, "error": "Missing datasetName or pg info"}
+        
+        conn_str = f"host={pg_info['host']} port={pg_info['port']} user={pg_info['user']} password={pg_info['password']} dbname={pg_info['database']}"
+        
+        with psycopg.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                # Try warehouse table first, fallback to staging
+                table = f'warehouse."{dataset_name}_clean"'
+                try:
+                    cur.execute(f"select count(*) from {table}")
+                    total_rows = cur.fetchone()[0]
+                except Exception:
+                    table = f'staging."{dataset_name}"'
+                    cur.execute(f"select count(*) from {table}")
+                    total_rows = cur.fetchone()[0]
+                
+                # Get all data
+                cur.execute(f"select * from {table} order by 1")
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                
+                # Create CSV content
+                csv_lines = [','.join(cols)]  # Header
+                for row in rows:
+                    escaped_values = []
+                    for v in row:
+                        escaped_v = str(v).replace('"', '""')
+                        escaped_values.append(f'"{escaped_v}"')
+                    csv_lines.append(','.join(escaped_values))
+                
+                csv_content = '\n'.join(csv_lines)
+                
+                return {
+                    "ok": True, 
+                    "table": table,
+                    "total_rows": total_rows,
+                    "csv_content": csv_content,
+                    "filename": f"{dataset_name}_export.csv"
+                }
+                
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 def load_csv_to_postgres(csv_bytes: bytes, pg: PGInfo, staging_table: str):
     conn_str = f"host={pg.host} port={pg.port} user={pg.user} password={pg.password} dbname={pg.database}"
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
             cur.execute("create schema if not exists staging;")
-            cur.execute(f'drop table if exists staging."{staging_table}";')
+            cur.execute(f'drop table if exists staging."{staging_table}" CASCADE;')
             # Use pandas to infer & create
             df = pd.read_csv(io.BytesIO(csv_bytes))
             # Clean column names to be valid PostgreSQL identifiers
@@ -83,12 +138,18 @@ def load_csv_to_postgres(csv_bytes: bytes, pg: PGInfo, staging_table: str):
             # Define table structure (all text for simplicity)
             col_defs = ", ".join([f'"{c}" text' for c in df.columns])
             cur.execute(f'create table staging."{staging_table}" ({col_defs});')
-            # Write temp CSV to disk and use psycopg copy
-            tmp_path = tempfile.mktemp(suffix=".csv")
-            df.to_csv(tmp_path, index=False)
-            with open(tmp_path, "r", encoding="utf-8") as f:
-                cur.copy(f'COPY staging."{staging_table}" FROM STDIN WITH (FORMAT CSV, HEADER TRUE)', f)
-            os.remove(tmp_path)
+            # Use INSERT statements instead of COPY (COPY was failing silently)
+            console.print(f"[blue]Inserting {len(df)} rows into staging table")
+            for _, row in df.iterrows():
+                # Escape single quotes properly
+                escaped_values = []
+                for v in row.values:
+                    escaped_v = str(v).replace("'", "''")
+                    escaped_values.append(f"'{escaped_v}'")
+                values = ', '.join(escaped_values)
+                insert_sql = f'INSERT INTO staging."{staging_table}" VALUES ({values})'
+                cur.execute(insert_sql)
+            console.print(f"[green]✓ Successfully inserted {len(df)} rows")
         conn.commit()
 
 def ensure_dbt_model(dataset: str, df_sample_cols):
@@ -129,16 +190,52 @@ def dispatch_to_slack(slack: SlackInfo, pg: PGInfo, dataset: str, max_rows_per_m
                 cur.execute(f"select count(*) from {table}")
                 total_rows = cur.fetchone()[0]
                 
-                # Then get the data with ordering for consistency
-                cur.execute(f"select * from {table} order by 1 limit {max_rows_per_message}")
+                # Smart sampling: show different rows based on dataset size
+                if total_rows <= 50:
+                    # Small dataset: show all rows
+                    cur.execute(f"select * from {table} order by 1")
+                    sample_type = "all"
+                elif total_rows <= 200:
+                    # Medium dataset: show first 20 rows
+                    cur.execute(f"select * from {table} order by 1 limit {max_rows_per_message}")
+                    sample_type = f"first {max_rows_per_message}"
+                else:
+                    # Large dataset: show sample from beginning, middle, and end
+                    sample_size = min(max_rows_per_message, 15)
+                    cur.execute(f"""
+                        (SELECT * FROM {table} ORDER BY 1 LIMIT {sample_size//3})
+                        UNION ALL
+                        (SELECT * FROM {table} ORDER BY 1 OFFSET {total_rows//2 - sample_size//6} LIMIT {sample_size//3})
+                        UNION ALL
+                        (SELECT * FROM {table} ORDER BY 1 DESC LIMIT {sample_size//3})
+                        ORDER BY 1
+                    """)
+                    sample_type = f"sample (beginning, middle, end)"
+                    
             except Exception:
                 table = f'staging."{dataset}"'
                 # First get total count
                 cur.execute(f"select count(*) from {table}")
                 total_rows = cur.fetchone()[0]
                 
-                # Then get the data with ordering for consistency
-                cur.execute(f"select * from {table} order by 1 limit {max_rows_per_message}")
+                # Same smart sampling logic for staging table
+                if total_rows <= 50:
+                    cur.execute(f"select * from {table} order by 1")
+                    sample_type = "all"
+                elif total_rows <= 200:
+                    cur.execute(f"select * from {table} order by 1 limit {max_rows_per_message}")
+                    sample_type = f"first {max_rows_per_message}"
+                else:
+                    sample_size = min(max_rows_per_message, 15)
+                    cur.execute(f"""
+                        (SELECT * FROM {table} ORDER BY 1 LIMIT {sample_size//3})
+                        UNION ALL
+                        (SELECT * FROM {table} ORDER BY 1 OFFSET {total_rows//2 - sample_size//6} LIMIT {sample_size//3})
+                        UNION ALL
+                        (SELECT * FROM {table} ORDER BY 1 DESC LIMIT {sample_size//3})
+                        ORDER BY 1
+                    """)
+                    sample_type = f"sample (beginning, middle, end)"
             
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description]
@@ -147,7 +244,7 @@ def dispatch_to_slack(slack: SlackInfo, pg: PGInfo, dataset: str, max_rows_per_m
         "*Relayboard Dispatch*",
         f"Table: `{table}`",
         f"Total Rows: {total_rows}",
-        f"Showing: {len(rows)} rows" + (f" (first {max_rows_per_message})" if total_rows > max_rows_per_message else ""),
+        f"Showing: {len(rows)} rows ({sample_type})",
         "```"
     ]
     
@@ -157,8 +254,12 @@ def dispatch_to_slack(slack: SlackInfo, pg: PGInfo, dataset: str, max_rows_per_m
     
     text_lines.append("```")
     
-    if total_rows > max_rows_per_message:
-        text_lines.append(f"_Note: Showing first {max_rows_per_message} of {total_rows} total rows_")
+    if total_rows > len(rows):
+        text_lines.append(f"_Note: Showing {sample_type} of {total_rows} total rows_")
+        
+        # For large datasets, suggest exporting full data
+        if total_rows > 200:
+            text_lines.append(f"_💡 For full dataset ({total_rows} rows), use the export endpoint: POST /export_data_")
     
     payload = {"text": "\n".join(text_lines)}
     requests.post(slack.webhookUrl, json=payload)
